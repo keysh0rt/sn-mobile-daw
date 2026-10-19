@@ -1,0 +1,11 @@
+{
+  "name": "SN Studio Mobile DAW",
+  "short_name": "SN Studio",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#101114",
+  "theme_color": "#101114",
+  "description": "Mobile-first music production workspace and sample instrument lab",
+  "icons": []
+}
