@@ -1,641 +1,528 @@
-
-const $ = id => document.getElementById(id);
-
-let audioCtx = null;
-let sounds = [];
-let selected = null;
-let activeVoices = new Map();
-let nextId = 1;
-let db = null;
-
-const noteNames = ['C', 'C#', 'D', 'D#', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const categories = [
-  'Drums', 'Bass', 'Keys', 'Guitar', 'Vocals',
-  'Orchestral', 'Synth', 'Loops', 'FX', 'Unsorted'
-];
-
-function slug(s) {
-  return s.toLowerCase()
-    .replace(/\.[^.]+$/, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40) || 'sound';
-}
-
-function makeId() {
-  return globalThis.crypto?.randomUUID?.()
-    || `sn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function guessCategory(name, duration = 0) {
-  const n = name.toLowerCase();
-
-  if (/kick|snare|hat|clap|drum|perc|rim|tom|cymbal/.test(n)) return 'Drums';
-  if (/808|bass|sub|low-end/.test(n)) return 'Bass';
-  if (/piano|keys|rhodes|organ|bell|mallet/.test(n)) return 'Keys';
-  if (/guitar|strat|acoustic/.test(n)) return 'Guitar';
-  if (/vocal|voice|vox|chant|adlib/.test(n)) return 'Vocals';
-  if (/string|violin|cello|brass|flute|sax/.test(n)) return 'Orchestral';
-  if (/pad|lead|synth|pluck|arp/.test(n)) return 'Synth';
-  if (/loop|music-loop|beat|break/.test(n)) return 'Loops';
-  if (/fx|effect|riser|impact|sweep|noise|transition/.test(n)) return 'FX';
-
-  return 'Unsorted';
-}
-
-function makeName(category, index) {
-  const prefixes = {
-    Drums: 'DrumVault',
-    Bass: 'SubForge',
-    Keys: 'Velvet-Keys',
-    Guitar: 'StringLab',
-    Vocals: 'VoxCraft',
-    Orchestral: 'CineTone',
-    Synth: 'Pulse',
-    Loops: 'LoopLab',
-    FX: 'FXLab',
-    Unsorted: 'Sound'
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const scales = {
+    "C minor": [0, 2, 3, 5, 7, 8, 10],
+    "C major": [0, 2, 4, 5, 7, 9, 11],
+    "A minor": [0, 2, 3, 5, 7, 8, 10],
+    "D minor": [0, 2, 3, 5, 7, 9, 10]
   };
-
-  return `SN ${prefixes[category] || 'Sound'} ${String(index).padStart(3, '0')}`;
-}
-
-function fmtBytes(n) {
-  return n < 1024 * 1024
-    ? `${(n / 1024).toFixed(0)} KB`
-    : `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-/* ---------- Persistent sound database ---------- */
-
-function openLibraryDB() {
-  return new Promise((resolve, reject) => {
-    if (!('indexedDB' in window)) {
-      reject(new Error('IndexedDB is not available in this browser.'));
-      return;
-    }
-
-    const request = indexedDB.open('SNStudioLibrary', 1);
-
-    request.onupgradeneeded = () => {
-      const database = request.result;
-
-      if (!database.objectStoreNames.contains('sounds')) {
-        database.createObjectStore('sounds', { keyPath: 'id' });
-      }
+  let audioCtx = null;
+  let masterGain = null;
+  let sounds = [];
+  let selected = null;
+  let activeVoices = new Map();
+  let nextId = 1;
+  let currentView = "arrangement";
+  let currentCategory = "All";
+  let midiNotes = [];
+  let selectedNoteId = null;
+  let dragState = null;
+  let playbackTimer = null;
+  let playbackStep = 0;
+  let trackCount = 3;
+  let isPlaying = false;
+  function status(message) {
+    if ($("statusMessage")) $("statusMessage").textContent = message;
+  }
+  function slug(s) {
+    return s.toLowerCase().replace(/\.[^.]+$/, "")
+      .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "sound";
+  }
+  function guessCategory(name) {
+    const n = name.toLowerCase();
+    if (/808|kick|snare|hat|clap|drum|perc|rim|tom/.test(n)) return "Drums";
+    if (/bass|sub|low/.test(n)) return "Bass";
+    if (/piano|keys|rhodes|organ|bell|mallet/.test(n)) return "Keys";
+    if (/guitar|strat|acoustic/.test(n)) return "Guitar";
+    if (/vocal|voice|vox|chant/.test(n)) return "Vocals";
+    if (/string|violin|cello|brass|flute|sax/.test(n)) return "Orchestral";
+    if (/pad|lead|synth|pluck/.test(n)) return "Synth";
+    return "Unsorted";
+  }
+  function makeName(category, index) {
+    const prefixes = {
+      Drums: "DrumVault", Bass: "SubForge", Keys: "VelvetKeys",
+      Guitar: "StringLab", Vocals: "VoxCraft",
+      Orchestral: "CineTone", Synth: "Pulse", Unsorted: "Sound"
     };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function dbRequest(mode, action) {
-  return new Promise((resolve, reject) => {
-    if (!db) {
-      reject(new Error('Library database is not ready.'));
-      return;
-    }
-
-    const tx = db.transaction('sounds', mode);
-    const store = tx.objectStore('sounds');
-    let request;
-
+    return `SN ${prefixes[category] || "Sound"} ${String(index).padStart(3, "0")}`;
+  }
+  function fmtBytes(n) {
+    return n < 1024 * 1024
+      ? `${(n / 1024).toFixed(0)} KB`
+      : `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+  async function startAudio() {
     try {
-      request = action(store);
+      if (!audioCtx) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error("Web Audio is not supported in this browser.");
+        audioCtx = new AudioContextClass();
+        masterGain = audioCtx.createGain();
+        masterGain.gain.value = Number($("masterVolume")?.value ?? 80) / 100;
+        masterGain.connect(audioCtx.destination);
+      }
+      if (audioCtx.state === "suspended") await audioCtx.resume();
+      $("audioStatus").textContent = "Audio engine ready";
+      $("audioStart").textContent = "Audio Ready";
+      status("Audio engine ready.");
+      return true;
     } catch (error) {
-      reject(error);
+      status(error.message || "Could not start audio.");
+      return false;
+    }
+  }
+  $("audioStart")?.addEventListener("click", startAudio);
+  function switchView(view) {
+    if (!$( "view-" + view)) return;
+    currentView = view;
+    document.querySelectorAll(".view").forEach(el => {
+      el.classList.toggle("active", el.id === "view-" + view);
+    });
+    document.querySelectorAll("[data-view]").forEach(el => {
+      el.classList.toggle("active", el.dataset.view === view);
+    });
+    const titles = {
+      arrangement: ["Arrangement", "Build your sound, one pattern at a time."],
+      piano: ["Piano Roll", "Create, move, and resize MIDI note blocks."],
+      sounds: ["Sound Library", "Import and organize your audio samples."],
+      mixer: ["Mixer", "Control the master output."]
+    };
+    $("viewTitle").textContent = titles[view][0];
+    $("viewDescription").textContent = titles[view][1];
+  }
+  document.querySelectorAll("[data-view]").forEach(button => {
+    button.addEventListener("click", () => switchView(button.dataset.view));
+  });
+  document.querySelectorAll("[data-go]").forEach(button => {
+    button.addEventListener("click", () => switchView(button.dataset.go));
+  });
+  $("brandHome")?.addEventListener("click", () => switchView("arrangement"));
+  // Audio import and automatic categorization.
+  $("fileInput")?.addEventListener("change", async event => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    if (!await startAudio()) return;
+    let imported = 0;
+    for (const file of files) {
+      if (!file.type.startsWith("audio/") &&
+          !/\.(wav|aiff?|flac|mp3|ogg|m4a|aac|opus)$/i.test(file.name)) continue;
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+        const category = guessCategory(file.name);
+        const item = {
+          id: `sn-${slug(file.name)}-${nextId}`,
+          name: makeName(category, nextId),
+          originalName: file.name,
+          category,
+          size: file.size,
+          duration: decoded.duration,
+          sampleRate: decoded.sampleRate,
+          channels: decoded.numberOfChannels,
+          buffer: decoded
+        };
+        nextId++;
+        sounds.push(item);
+        imported++;
+      } catch (error) {
+        console.warn("Could not decode", file.name, error);
+      }
+    }
+    event.target.value = "";
+    renderLibrary();
+    if (imported) {
+      status(`Imported ${imported} sound${imported === 1 ? "" : "s"}.`);
+    } else {
+      status("No supported audio files were imported.");
+    }
+  });
+  function renderLibrary() {
+    const library = $("library");
+    if (!library) return;
+    const visible = sounds.filter(s =>
+      currentCategory === "All" || s.category === currentCategory
+    );
+    $("soundCount").textContent = sounds.length;
+    $("categoryCount").textContent = new Set(sounds.map(s => s.category)).size;
+    library.replaceChildren();
+    if (!visible.length) {
+      library.className = "library empty";
+      library.textContent = sounds.length
+        ? "No sounds in this category yet."
+        : "Your sounds will appear here after you import audio.";
       return;
     }
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function saveSound(sound, audioBlob) {
-  const record = {
-    id: sound.id,
-    name: sound.name,
-    originalName: sound.originalName,
-    category: sound.category,
-    size: sound.size,
-    duration: sound.duration,
-    sampleRate: sound.sampleRate,
-    channels: sound.channels,
-    lastModified: sound.lastModified || 0,
-    createdAt: sound.createdAt || Date.now(),
-    audioBlob
-  };
-
-  await dbRequest('readwrite', store => store.put(record));
-}
-
-async function loadSavedLibrary() {
-  if (!db) return;
-
-  const records = await dbRequest('readonly', store => store.getAll());
-
-  for (const record of records) {
-    try {
-      if (!record.audioBlob) continue;
-
-      const bytes = await record.audioBlob.arrayBuffer();
-      const ctx = await ensureAudio();
-      const buffer = await ctx.decodeAudioData(bytes.slice(0));
-
-      sounds.push({
-        ...record,
-        buffer
+    library.className = "library";
+    visible.forEach(sound => {
+      const row = document.createElement("div");
+      row.className = "soundrow";
+      const icon = document.createElement("div");
+      icon.className = "soundicon";
+      icon.textContent = "♫";
+      const meta = document.createElement("div");
+      meta.className = "soundmeta";
+      const title = document.createElement("strong");
+      title.textContent = sound.name;
+      const sub = document.createElement("small");
+      sub.textContent =
+        `${sound.category} · ${sound.duration.toFixed(2)} sec · ${fmtBytes(sound.size)} · ${sound.originalName}`;
+      meta.append(title, sub);
+      const select = document.createElement("button");
+      select.textContent = selected?.id === sound.id ? "Selected" : "Select";
+      select.addEventListener("click", () => {
+        selected = sound;
+        $("selectedName").textContent = sound.name;
+        $("playSelected").disabled = false;
+        renderLibrary();
       });
-    } catch (error) {
-      console.warn('Could not restore sound:', record.originalName, error);
+      const play = document.createElement("button");
+      play.textContent = "▶";
+      play.setAttribute("aria-label", "Preview sound");
+      play.addEventListener("click", () => playSound(sound, 0));
+      row.append(icon, meta, select, play);
+      library.append(row);
+    });
+    if (!selected && sounds.length) {
+      selected = sounds[0];
+      $("selectedName").textContent = selected.name;
+      $("playSelected").disabled = false;
     }
   }
-
-  nextId = sounds.length + 1;
-
-  if (sounds.length && !selected) {
-    selected = sounds[0];
-    updateSelected();
-  }
-
-  renderLibrary();
-  updateLibraryStatus();
-}
-
-/* ---------- Audio engine ---------- */
-
-async function ensureAudio() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  }
-
-  if (audioCtx.state === 'suspended') {
-    await audioCtx.resume();
-  }
-
-  return audioCtx;
-}
-
-async function startAudio() {
-  try {
-    await ensureAudio();
-
-    $('audioStatus').textContent = 'Audio engine ready';
-    $('audioStart').textContent = 'Audio Ready';
-  } catch (error) {
-    console.error(error);
-    $('audioStatus').textContent = 'Audio unavailable — try tapping Enable Audio again';
-  }
-}
-
-$('audioStart').addEventListener('click', startAudio);
-
-async function playSound(sound, semitones = 0, hold = false, keyId = null) {
-  if (!sound?.buffer) return;
-
-  try {
-    const ctx = await ensureAudio();
-    const source = ctx.createBufferSource();
-    const gain = ctx.createGain();
-
+  $("categoryFilter")?.addEventListener("click", event => {
+    const button = event.target.closest("[data-category]");
+    if (!button) return;
+    currentCategory = button.dataset.category;
+    document.querySelectorAll("[data-category]").forEach(chip => {
+      chip.classList.toggle("active", chip === button);
+    });
+    renderLibrary();
+  });
+  async function playSound(sound, semitones = 0, hold = false, keyId = null) {
+    if (!sound || !await startAudio()) return;
+    const source = audioCtx.createBufferSource();
     source.buffer = sound.buffer;
     source.playbackRate.value = Math.pow(2, semitones / 12);
-    gain.gain.value = Number($('gain').value) / 100;
-
+    const gain = audioCtx.createGain();
+    gain.gain.value = Number($("gain")?.value ?? 80) / 100;
     source.connect(gain);
-    gain.connect(ctx.destination);
-
+    gain.connect(masterGain);
     if (hold && keyId) {
-      source.loop = true;
       activeVoices.set(keyId, { source, gain });
+      source.onended = () => activeVoices.delete(keyId);
     }
-
-    source.onended = () => {
-      if (activeVoices.get(keyId)?.source === source) {
-        activeVoices.delete(keyId);
-      }
-    };
-
     source.start();
-  } catch (error) {
-    console.error('Playback failed:', error);
+    status(`Playing ${sound.name}`);
   }
-}
-
-function stopVoice(id) {
-  const voice = activeVoices.get(id);
-
-  if (voice) {
-    try {
-      voice.source.stop();
-    } catch {}
-
+  function stopVoice(id) {
+    const voice = activeVoices.get(id);
+    if (!voice) return;
+    try { voice.source.stop(); } catch (_) {}
     activeVoices.delete(id);
   }
-}
-
-/* ---------- Import: individual files or folders ---------- */
-
-async function importFiles(fileList) {
-  const files = Array.from(fileList || []);
-  let added = 0;
-  let skipped = 0;
-
-  if (!files.length) return;
-
-  await startAudio();
-
-  for (const file of files) {
-    if (
-      !file.type.startsWith('audio/') &&
-      !/\.(wav|aiff?|flac|mp3|ogg|m4a|aac|opus)$/i.test(file.name)
-    ) {
-      skipped++;
-      continue;
+  $("playSelected")?.addEventListener("click", () => {
+    if (selected) playSound(selected, Number($("pitch").value));
+  });
+  $("pitch")?.addEventListener("input", event => {
+    $("pitchLabel").textContent = `${event.target.value} st`;
+  });
+  $("gain")?.addEventListener("input", event => {
+    $("gainLabel").textContent = `${event.target.value}%`;
+  });
+  $("masterVolume")?.addEventListener("input", event => {
+    const value = Number(event.target.value);
+    $("masterLabel").textContent = `${value}%`;
+    if (masterGain && audioCtx) {
+      masterGain.gain.setTargetAtTime(value / 100, audioCtx.currentTime, 0.015);
     }
-
-    try {
-      const bytes = await file.arrayBuffer();
-      const ctx = await ensureAudio();
-      const buffer = await ctx.decodeAudioData(bytes.slice(0));
-
-      // Avoid importing the same file repeatedly.
-      const duplicate = sounds.some(sound =>
-        sound.originalName === file.name &&
-        sound.size === file.size &&
-        sound.lastModified === file.lastModified
-      );
-
-      if (duplicate) {
-        skipped++;
-        continue;
-      }
-
-      const category = guessCategory(file.name, buffer.duration);
-      const id = makeId();
-
-      const sound = {
-        id,
-        name: makeName(category, nextId),
-        originalName: file.name,
-        category,
-        size: file.size,
-        duration: buffer.duration,
-        sampleRate: buffer.sampleRate,
-        channels: buffer.numberOfChannels,
-        lastModified: file.lastModified || 0,
-        createdAt: Date.now(),
-        buffer
-      };
-
-      // Save original audio bytes, not the temporary AudioBuffer.
-      const blob = new Blob([bytes], {
-        type: file.type || 'application/octet-stream'
+  });
+  // Touch-friendly sample keyboard.
+  function buildKeyboard() {
+    const keyboard = $("keyboard");
+    if (!keyboard) return;
+    keyboard.replaceChildren();
+    for (let i = 0; i < 12; i++) {
+      const note = noteNames[i];
+      const button = document.createElement("button");
+      button.className = "key" + (note.includes("#") ? " black" : "");
+      button.textContent = note;
+      button.addEventListener("pointerdown", event => {
+        event.preventDefault();
+        if (!selected) {
+          switchView("sounds");
+          $("fileInput").click();
+          return;
+        }
+        const id = `key-${i}`;
+        playSound(selected, Number($("pitch").value) + i - 5,
+          $("playMode").value === "sustain", id);
       });
-
-      if (db) {
-        try {
-          await saveSound(sound, blob);
-        } catch (storageError) {
-          console.warn('Local persistence failed:', storageError);
-          $('audioStatus').textContent =
-            'Imported for this session; browser storage could not save this file';
-        }
-      }
-
-      sounds.push(sound);
-      nextId++;
-      added++;
-    } catch (error) {
-      console.warn('Could not decode', file.name, error);
-      skipped++;
+      ["pointerup", "pointercancel", "pointerleave"].forEach(type => {
+        button.addEventListener(type, () => stopVoice(`key-${i}`));
+      });
+      keyboard.append(button);
     }
   }
-
-  if (!selected && sounds.length) {
-    selected = sounds[0];
-    updateSelected();
+  // Piano roll: 24 rows, 32 steps. Notes are session-local.
+  const ROWS = 24;
+  const STEPS = 32;
+  function noteForRow(row) {
+    const midi = 72 - row;
+    return { midi, name: noteNames[((midi % 12) + 12) % 12], octave: Math.floor(midi / 12) - 1 };
   }
-
-  renderLibrary();
-  updateLibraryStatus();
-
-  $('audioStatus').textContent =
-    `${added} sound${added === 1 ? '' : 's'} imported` +
-    (skipped ? ` · ${skipped} skipped` : '');
-
-  $('fileInput').value = '';
-
-  const folderInput = $('snFolderInput');
-  if (folderInput) folderInput.value = '';
-}
-
-$('fileInput').addEventListener('change', e => importFiles(e.target.files));
-
-/* Add a folder-import control without changing index.html.
-   Folder selection depends on browser support. */
-function addFolderImportControl() {
-  const uploadLabel = document.querySelector('.uploadbtn');
-  if (!uploadLabel || $('snFolderButton')) return;
-
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.id = 'snFolderInput';
-  input.multiple = true;
-  input.accept = 'audio/*,.wav,.aiff,.aif,.flac,.mp3,.ogg,.m4a,.aac,.opus';
-  input.setAttribute('webkitdirectory', '');
-  input.hidden = true;
-
-  const button = document.createElement('button');
-  button.id = 'snFolderButton';
-  button.type = 'button';
-  button.className = 'secondary';
-  button.textContent = 'Import folder';
-  button.title = 'Import a folder of audio files where supported';
-
-  button.addEventListener('click', () => input.click());
-  input.addEventListener('change', e => importFiles(e.target.files));
-
-  uploadLabel.insertAdjacentElement('afterend', button);
-  button.insertAdjacentElement('afterend', input);
-}
-
-/* ---------- Library UI ---------- */
-
-function updateSelected() {
-  $('selectedName').textContent = selected?.name || 'No sound selected';
-  $('playSelected').disabled = !selected;
-}
-
-function updateLibraryStatus() {
-  const status = $('audioStatus');
-
-  if (sounds.length && db) {
-    status.textContent = `${sounds.length} sound${sounds.length === 1 ? '' : 's'} in your library`;
-  } else if (!sounds.length) {
-    status.textContent = 'Import sounds to start your library';
+  function isScaleNote(row) {
+    const info = noteForRow(row);
+    const scale = scales[$("scaleSelect")?.value || "C minor"];
+    return scale.includes(info.midi % 12);
   }
-}
-
-function makeElement(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text !== undefined) element.textContent = text;
-  return element;
-}
-
-function ensureLibraryFilters() {
-  if ($('snLibrarySearch')) return;
-
-  const library = $('library');
-  const panel = library?.closest('.panel');
-  if (!panel) return;
-
-  const controls = makeElement('div', 'sn-library-filters');
-  controls.style.cssText =
-    'display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;';
-
-  const search = document.createElement('input');
-  search.id = 'snLibrarySearch';
-  search.type = 'search';
-  search.placeholder = 'Search your sounds…';
-  search.setAttribute('aria-label', 'Search sound library');
-  search.style.cssText =
-    'flex:1;min-width:150px;padding:10px;border-radius:10px;';
-
-  const filter = document.createElement('select');
-  filter.id = 'snCategoryFilter';
-  filter.setAttribute('aria-label', 'Filter sounds by category');
-  filter.style.cssText = 'padding:10px;border-radius:10px;';
-
-  ['All categories', ...categories].forEach(category => {
-    const option = document.createElement('option');
-    option.value = category === 'All categories' ? '' : category;
-    option.textContent = category;
-    filter.append(option);
-  });
-
-  search.addEventListener('input', renderLibrary);
-  filter.addEventListener('change', renderLibrary);
-
-  controls.append(search, filter);
-  library.insertAdjacentElement('beforebegin', controls);
-}
-
-function renderLibrary() {
-  const el = $('library');
-  if (!el) return;
-
-  ensureLibraryFilters();
-
-  const search = ($('snLibrarySearch')?.value || '').toLowerCase().trim();
-  const categoryFilter = $('snCategoryFilter')?.value || '';
-
-  const filtered = sounds.filter(sound => {
-    const matchesCategory = !categoryFilter || sound.category === categoryFilter;
-    const haystack =
-      `${sound.name} ${sound.originalName} ${sound.category}`.toLowerCase();
-
-    return matchesCategory && haystack.includes(search);
-  });
-
-  if (!sounds.length) {
-    el.className = 'library empty';
-    el.textContent =
-      'No sounds loaded yet. Import audio files or a folder to build your library.';
-    return;
-  }
-
-  el.className = 'library';
-  el.replaceChildren();
-
-  if (!filtered.length) {
-    el.append(makeElement('p', 'muted', 'No sounds match your search.'));
-    return;
-  }
-
-  filtered.forEach(sound => {
-    const row = makeElement('div', 'soundrow');
-    const icon = makeElement('div', 'soundicon', '♫');
-    const meta = makeElement('div', 'soundmeta');
-
-    const title = makeElement('strong', '', sound.name);
-    const sub = makeElement(
-      'small',
-      '',
-      `${sound.category} · ${sound.duration.toFixed(2)} sec · ${fmtBytes(sound.size)} · ${sound.originalName}`
-    );
-
-    meta.append(title, sub);
-
-    // Let the user correct an automatic classification.
-    const categorySelect = document.createElement('select');
-    categorySelect.setAttribute('aria-label', `Category for ${sound.originalName}`);
-
-    categories.forEach(category => {
-      const option = document.createElement('option');
-      option.value = category;
-      option.textContent = category;
-      option.selected = category === sound.category;
-      categorySelect.append(option);
-    });
-
-    categorySelect.addEventListener('change', async () => {
-      sound.category = categorySelect.value;
-
-      if (db) {
-        try {
-          await saveSound(
-            sound,
-            new Blob([], { type: 'application/octet-stream' })
-          );
-          // Replace the empty placeholder with the actual stored audio.
-          // The update below preserves audio by using the database record.
-        } catch (error) {
-          console.warn('Category update failed:', error);
-        }
+  function buildPiano() {
+    const keys = $("pianoKeys");
+    const grid = $("pianoGrid");
+    if (!keys || !grid) return;
+    keys.replaceChildren();
+    grid.replaceChildren();
+    for (let row = 0; row < ROWS; row++) {
+      const info = noteForRow(row);
+      const key = document.createElement("div");
+      key.className = "piano-key" + (info.name.includes("#") ? " black-key" : "");
+      if (info.name === "C") key.textContent = `C${info.octave}`;
+      if (info.name === "C" && info.octave % 2 === 0) key.classList.add("scale-root");
+      keys.append(key);
+    }
+    for (let row = 0; row < ROWS; row++) {
+      for (let step = 0; step < STEPS; step++) {
+        const cell = document.createElement("button");
+        cell.className = "piano-cell";
+        if (isScaleNote(row)) cell.classList.add("scale-note");
+        if (noteForRow(row).name === "C") cell.classList.add("root-note");
+        if (step % 4 === 0) cell.classList.add("bar-start");
+        cell.dataset.row = row;
+        cell.dataset.step = step;
+        cell.setAttribute("aria-label", `${noteForRow(row).name}${noteForRow(row).octave}, step ${step + 1}`);
+        cell.addEventListener("click", () => {
+          if (dragState) return;
+          const existing = midiNotes.find(n => n.row === row && step >= n.step && step < n.step + n.length);
+          if (existing) {
+            selectedNoteId = existing.id;
+          } else {
+            const note = { id: nextId++, row, step, length: 2 };
+            midiNotes.push(note);
+            selectedNoteId = note.id;
+          }
+          renderNotes();
+        });
+        grid.append(cell);
       }
-
-      renderLibrary();
-    });
-
-    // The category update must preserve the actual stored audio blob.
-    categorySelect.addEventListener('change', async () => {
-      if (!db) return;
-
-      try {
-        const existing = await dbRequest('readonly', store => store.get(sound.id));
-        if (existing?.audioBlob) {
-          await saveSound(sound, existing.audioBlob);
-        }
-      } catch (error) {
-        console.warn('Could not persist category:', error);
-      }
-    });
-
-    const selectButton = makeElement(
-      'button',
-      '',
-      selected?.id === sound.id ? 'Selected' : 'Select'
-    );
-
-    selectButton.addEventListener('click', () => {
-      selected = sound;
-      updateSelected();
-      renderLibrary();
-    });
-
-    const playButton = makeElement('button', '', '▶');
-    playButton.setAttribute('aria-label', `Play ${sound.originalName}`);
-    playButton.addEventListener('click', () => playSound(sound, 0, false));
-
-    row.append(icon, meta, categorySelect, selectButton, playButton);
-    el.append(row);
-  });
-}
-
-/* ---------- Sampler controls ---------- */
-
-$('playSelected').addEventListener('click', () => {
-  if (selected) {
-    playSound(selected, Number($('pitch').value), false);
+    }
+    renderNotes();
   }
-});
-
-$('pitch').addEventListener('input', e => {
-  $('pitchLabel').textContent = `${e.target.value} st`;
-});
-
-$('gain').addEventListener('input', e => {
-  $('gainLabel').textContent = `${e.target.value}%`;
-});
-
-function buildKeyboard() {
-  const el = $('keyboard');
-  if (!el || el.dataset.built) return;
-
-  el.dataset.built = 'true';
-
-  noteNames.slice(0, 12).forEach((note, i) => {
-    const button = makeElement(
-      'button',
-      `key${note.includes('#') ? ' black' : ''}`,
-      note
-    );
-
-    button.addEventListener('pointerdown', e => {
-      e.preventDefault();
-
-      if (!selected) {
-        $('fileInput').click();
-        return;
-      }
-
-      const id = `key-${i}`;
-      playSound(
-        selected,
-        Number($('pitch').value) + i - 5,
-        $('playMode').value === 'sustain',
-        id
-      );
+  function renderNotes() {
+    const grid = $("pianoGrid");
+    if (!grid) return;
+    grid.querySelectorAll(".midi-note").forEach(el => el.remove());
+    midiNotes.forEach(note => {
+      const el = document.createElement("div");
+      el.className = "midi-note" + (note.id === selectedNoteId ? " selected" : "");
+      el.style.left = `${note.step / STEPS * 100}%`;
+      el.style.width = `${note.length / STEPS * 100}%`;
+      el.style.top = `${note.row * 25 + 2}px`;
+      el.style.height = "20px";
+      el.dataset.id = note.id;
+      el.title = `${noteForRow(note.row).name}${noteForRow(note.row).octave} · ${note.length} steps`;
+      const handle = document.createElement("div");
+      handle.className = "note-handle";
+      handle.addEventListener("pointerdown", event => beginNoteDrag(event, note, true));
+      el.append(handle);
+      el.addEventListener("pointerdown", event => {
+        if (event.target === handle) return;
+        beginNoteDrag(event, note, false);
+      });
+      el.addEventListener("click", event => {
+        event.stopPropagation();
+        selectedNoteId = note.id;
+        renderNotes();
+      });
+      el.addEventListener("dblclick", event => {
+        event.stopPropagation();
+        midiNotes = midiNotes.filter(n => n.id !== note.id);
+        selectedNoteId = null;
+        renderNotes();
+      });
+      grid.append(el);
     });
-
-    button.addEventListener('pointerup', () => stopVoice(`key-${i}`));
-    button.addEventListener('pointercancel', () => stopVoice(`key-${i}`));
-    button.addEventListener('pointerleave', () => stopVoice(`key-${i}`));
-
-    el.append(button);
+    $("noteCount").textContent = `${midiNotes.length} NOTES`;
+  }
+  function beginNoteDrag(event, note, resize) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectedNoteId = note.id;
+    dragState = {
+      note,
+      resize,
+      startX: event.clientX,
+      startY: event.clientY,
+      originalStep: note.step,
+      originalRow: note.row,
+      originalLength: note.length
+    };
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (_) {}
+    renderNotes();
+  }
+  document.addEventListener("pointermove", event => {
+    if (!dragState) return;
+    const grid = $("pianoGrid");
+    const rect = grid.getBoundingClientRect();
+    const stepWidth = rect.width / STEPS;
+    const rowHeight = 25;
+    const dx = Math.round((event.clientX - dragState.startX) / stepWidth);
+    const dy = Math.round((event.clientY - dragState.startY) / rowHeight);
+    if (dragState.resize) {
+      dragState.note.length = Math.max(1, Math.min(STEPS - dragState.originalStep,
+        dragState.originalLength + dx));
+    } else {
+      dragState.note.step = Math.max(0, Math.min(STEPS - dragState.note.length,
+        dragState.originalStep + dx));
+      dragState.note.row = Math.max(0, Math.min(ROWS - 1,
+        dragState.originalRow + dy));
+    }
+    renderNotes();
   });
-}
-
-/* ---------- Export catalog ---------- */
-
-$('exportCatalog').addEventListener('click', () => {
-  const catalog = {
-    schemaVersion: 2,
-    generatedAt: new Date().toISOString(),
-    storage: db ? 'IndexedDB + browser session' : 'Browser session only',
-    instruments: sounds.map(({
-      id, name, originalName, category, size, duration,
-      sampleRate, channels, createdAt
-    }) => ({
-      id, name, originalName, category, size, duration,
-      sampleRate, channels, createdAt
-    }))
-  };
-
-  const blob = new Blob([JSON.stringify(catalog, null, 2)], {
-    type: 'application/json'
+  document.addEventListener("pointerup", () => { dragState = null; });
+  $("scaleSelect")?.addEventListener("change", buildPiano);
+  $("addNote")?.addEventListener("click", () => {
+    const note = { id: nextId++, row: 12, step: 0, length: 2 };
+    midiNotes.push(note);
+    selectedNoteId = note.id;
+    renderNotes();
   });
-
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-
-  a.href = url;
-  a.download = 'sn-sound-catalog.json';
-  a.click();
-
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-});
-
-/* ---------- Startup ---------- */
-
-async function initSNStudio() {
+  $("clearNotes")?.addEventListener("click", () => {
+    midiNotes = [];
+    selectedNoteId = null;
+    renderNotes();
+  });
+  // Arrangement patterns.
+  function addPattern(button) {
+    const track = button.dataset.pattern || "Track";
+    const created = document.createElement("button");
+    created.className = "pattern-block created";
+    created.textContent = `${track} pattern`;
+    created.title = "Tap to remove this pattern";
+    created.addEventListener("click", () => created.remove());
+    button.replaceWith(created);
+    status(`${track} pattern added.`);
+  }
+  document.querySelectorAll("[data-pattern]").forEach(button => {
+    button.addEventListener("click", () => addPattern(button));
+  });
+  $("addTrack")?.addEventListener("click", () => {
+    trackCount++;
+    const name = `Track ${trackCount}`;
+    const row = document.createElement("div");
+    row.className = "track-row";
+    row.dataset.track = name;
+    const label = document.createElement("div");
+    label.className = "track-label";
+    const number = document.createElement("b");
+    number.textContent = String(trackCount).padStart(2, "0");
+    const title = document.createElement("span");
+    title.textContent = name;
+    const type = document.createElement("small");
+    type.textContent = "AUDIO TRACK";
+    label.append(number, title, type);
+    const lane = document.createElement("div");
+    lane.className = "track-lane";
+    const pattern = document.createElement("button");
+    pattern.className = "pattern-block";
+    pattern.dataset.pattern = name;
+    pattern.textContent = "＋ Create pattern";
+    pattern.addEventListener("click", () => addPattern(pattern));
+    lane.append(pattern);
+    row.append(label, lane);
+    $("timeline").append(row);
+    status(`${name} added.`);
+  });
+  // Transport: the metronome is a timing scaffold, not a full song sequencer.
+  function stopTransport() {
+    isPlaying = false;
+    if (playbackTimer) clearInterval(playbackTimer);
+    playbackTimer = null;
+    $("playTransport").textContent = "▶";
+    status("Playback stopped.");
+  }
+  $("playTransport")?.addEventListener("click", async () => {
+    if (isPlaying) {
+      stopTransport();
+      return;
+    }
+    if (!await startAudio()) return;
+    isPlaying = true;
+    playbackStep = 0;
+    $("playTransport").textContent = "Ⅱ";
+    status("Transport running.");
+    const tick = () => {
+      if (!audioCtx || !isPlaying) return;
+      const bpm = Math.max(40, Math.min(240, Number($("tempo").value) || 120));
+      const beatMs = 60000 / bpm;
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = playbackStep % 4 === 0 ? 1000 : 700;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.08, now + 0.003);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.035);
+      osc.connect(gain).connect(masterGain);
+      osc.start(now);
+      osc.stop(now + 0.04);
+      playbackStep++;
+      if (playbackStep % 4 === 0) status(`Bar beat ${playbackStep / 4}`);
+      playbackTimer = setTimeout(tick, beatMs);
+    };
+    tick();
+  });
+  $("stopTransport")?.addEventListener("click", stopTransport);
+  // Download the editable MIDI note arrangement as JSON for now.
+  $("saveProject")?.addEventListener("click", () => {
+    const project = {
+      format: "SN Mobile DAW Project",
+      version: 1,
+      savedAt: new Date().toISOString(),
+      tempo: Number($("tempo").value) || 120,
+      scale: $("scaleSelect").value,
+      notes: midiNotes,
+      patterns: Array.from(document.querySelectorAll(".pattern-block.created")).map(p => ({
+        name: p.textContent,
+        track: p.closest(".track-row")?.dataset.track || "Track"
+      })),
+      soundCatalog: sounds.map(({ id, name, originalName, category, duration }) =>
+        ({ id, name, originalName, category, duration }))
+    };
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "sn-mobile-daw-project.json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    status("Project data exported as JSON.");
+  });
+  $("exportCatalog")?.addEventListener("click", () => {
+    const catalog = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      instruments: sounds.map(({ id, name, originalName, category, size, duration, sampleRate, channels }) =>
+        ({ id, name, originalName, category, size, duration, sampleRate, channels }))
+    };
+    const blob = new Blob([JSON.stringify(catalog, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "sn-sound-catalog.json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
   buildKeyboard();
-  addFolderImportControl();
-  ensureLibraryFilters();
-
-  try {
-    db = await openLibraryDB();
-    await loadSavedLibrary();
-  } catch (error) {
-    console.warn('Persistent library unavailable:', error);
-    $('audioStatus').textContent =
-      'Session-only mode: browser storage is unavailable';
-    renderLibrary();
-  }
-}
-
-initSNStudio();
+  buildPiano();
+  renderLibrary();
+})();
